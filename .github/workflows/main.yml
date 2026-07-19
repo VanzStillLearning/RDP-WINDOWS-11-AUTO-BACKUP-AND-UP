@@ -26,7 +26,7 @@ jobs:
       - name: "2. Setup Node.js"
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: '24'
 
       - name: "3. Cache Node Modules"
         uses: actions/cache@v4
