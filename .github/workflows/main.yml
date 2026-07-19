@@ -1,109 +1,105 @@
-name: WA Bot Continuous (WARP + Auto Backup)
+name: RDP-BOT-WA-AUTO-LOOP
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-      
+  # push:
+  #   branches: [ main ] # Buka hashtag ini kalau mau otomatis jalan pas lu update file
+
+concurrency:
+  group: rdp-wa-loop
+  cancel-in-progress: true
+
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    
+    timeout-minutes: 360
+    permissions:
+      contents: write
+      actions: write
+
     steps:
-      # 1. Tarik file terbaru
-      - name: Checkout Repository
+      - name: "1. Checkout Repository"
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.PAT_TOKEN }} # Wajib pakai PAT di sini biar bisa auto-backup
-          clean: true
+          token: ${{ secrets.PAT_TOKEN }}
 
-      # 2. Setup Node.js
-      - name: Setup Node.js
+      - name: "2. Setup Node.js"
         uses: actions/setup-node@v4
         with:
-          node-version: '26'
+          node-version: '20'
 
-      # 3. Cache node_modules
-      - name: Cache node_modules
-        id: cache-npm
-        uses: actions/cache@v3
+      - name: "3. Cache Node Modules"
+        uses: actions/cache@v4
         with:
           path: node_modules
           key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
           restore-keys: |
             ${{ runner.os }}-node-
 
-      # 4. Setup Cloudflare WARP VPN
-      - name: Setup Cloudflare WARP
+      - name: "4. Setup VPN Cloudflare WARP (Versi Ngebut)"
         run: |
-          echo "Menyiapkan Cloudflare WARP..."
+          echo "Install WARP via APT (Jauh lebih cepat dari Windows MSI)..."
           curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
           echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
-          sudo apt-get update
+          
+          # Install & Connect
+          sudo apt-get update -q
           sudo apt-get install -y cloudflare-warp
           
           warp-cli --accept-tos registration new
           warp-cli --accept-tos mode warp
           warp-cli --accept-tos connect
           
-          # Jeda bentar biar koneksi masuk ke VPN
-          sleep 5
-          echo "IP VPN Aktif:"
+          sleep 3
+          echo "==============================="
+          echo "IP VPN Aktif Sekarang:"
           curl -4 ifconfig.me
-          echo ""
+          echo -e "\n==============================="
 
-      # 5. Jalankan Bot & Lock Workflow (Keep Alive 5 Jam)
-      - name: Start Bot and Wait 5 Hours
+      - name: "5. Install Dependencies"
         run: |
-          # Cek node_modules, kalau gada baru install
-          if [ ! -d "node_modules" ]; then 
-            echo "Install package..."
-            npm install
+          if [ -d "node_modules" ]; then
+            echo "Folder node_modules ditemukan dari Cache! Skip npm install."
           else
-            echo "node_modules dari cache ketemu, skip install..."
+            echo "Folder node_modules tidak ditemukan! Menjalankan npm install..."
+            npm install
           fi
-          
-          # Jalankan bot di background dan simpan Process ID-nya (PID)
-          echo "Mulai menjalankan bot..."
-          npm start & 
-          BOT_PID=$!
-          echo "Bot berjalan dengan PID: $BOT_PID"
-          
-          # Menahan (lock) sistem agar tidak lanjut ke step berikutnya selama 5 jam (18000 detik)
-          echo "Bot dikunci selama 5 jam. Workflow dalam status In Progress..."
-          sleep 18000 
-          
-          # Setelah 5 jam habis, kill process bot agar bisa lanjut ke proses backup
-          echo "Waktu habis, mematikan bot untuk persiapan auto-backup..."
-          kill $BOT_PID || true
 
-      # 6. Auto Backup (Commit & Push file yang berubah/session baru)
-      - name: Auto Backup Session to Repo
+      - name: "6. Run Bot (Auto-Restart & Limit 5 Jam)"
         run: |
-          echo "Memulai backup data session..."
+          # Ini versi Linux dari script PowerShell lu. 
+          # Bot jalan di depan (foreground) biar log/QR code kelihatan di tab Actions.
+          # Kalau crash, otomatis restart dalam 5 detik.
+          timeout 5h bash -c '
+            while true; do
+              echo "Menjalankan Bot..."
+              npm start
+              echo "Bot crash atau berhenti, restart dalam 5 detik..."
+              sleep 5
+            done
+          ' || true
+
+      - name: "7. Auto-Backup Session & File"
+        if: always()
+        run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
           
-          git add .
-          
-          # Cek apakah ada file yang berubah (misal folder session)
           if git diff-index --quiet HEAD --; then
-            echo "Tidak ada perubahan data untuk di-backup."
+            echo "Tidak ada perubahan file (Session aman)."
           else
-            # Pakai [skip ci] biar push ini nggak numpuk trigger workflow baru
-            git commit -m "Auto backup session & data (5 jam) [skip ci]"
-            git push https://${{ secrets.PAT_TOKEN }}@github.com/${{ github.repository }}.git HEAD:main
-            echo "Backup sukses di-push ke repository!"
+            echo "Ditemukan perubahan file. Melakukan commit..."
+            git commit -m "Auto-backup data bot (5 jam) [skip ci]"
+            git push origin HEAD:main
           fi
 
-      # 7. Auto Trigger Workflow (Biar looping)
-      - name: Trigger Next Run
+      - name: "8. Auto-Up (Trigger Siklus Berikutnya)"
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
-          echo "Memicu ulang workflow untuk 5 jam berikutnya..."
-          curl -X POST \
-            -H "Accept: application/vnd.github.v3+json" \
-            -H "Authorization: Bearer ${{ secrets.PAT_TOKEN }}" \
-            https://api.github.com/repos/${{ github.repository }}/actions/workflows/wabot.yml/dispatches \
-            -d '{"ref":"main"}'
-            
+          echo "Memicu ulang workflow untuk 5 jam ke depan..."
+          # Command ini otomatis ngebaca nama file workflow lu yang lagi jalan
+          gh workflow run "${{ github.workflow }}" --ref main
+          
