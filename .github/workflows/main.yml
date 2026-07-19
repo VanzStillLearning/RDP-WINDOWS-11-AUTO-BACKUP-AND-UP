@@ -1,121 +1,96 @@
-name: RDP-BOT-WA-AUTO-LOOP
+name: WA Bot Continuous (WARP + Auto Backup)
 
 on:
   workflow_dispatch:
-
-concurrency:
-  group: rdp-wa-loop
-  cancel-in-progress: true
-
+  push:
+    branches:
+      - main
+      
 jobs:
-  build:
-    runs-on: windows-latest
-    timeout-minutes: 360
-    permissions:
-      contents: write
-
+  run-bot:
+    runs-on: ubuntu-latest
+    
     steps:
-      - name: "1. Checkout Repository"
+      # 1. Tarik file terbaru
+      - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PAT_TOKEN }} # Wajib pakai PAT di sini biar bisa push
+          clean: true
 
-      - name: "2. Setup Environment"
-        run: |
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389
+      # 2. Setup Node.js
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
 
-      - name: "3. Create Admin User"
-        run: |
-          $pass = ConvertTo-SecureString "ServerKuat99@!" -AsPlainText -Force
-          New-LocalUser -Name "RDP" -Password $pass
-          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
-
-      - name: "4. Cache Node Modules"
-        uses: actions/cache@v4
+      # 3. Cache node_modules
+      - name: Cache node_modules
+        id: cache-npm
+        uses: actions/cache@v3
         with:
           path: node_modules
           key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
           restore-keys: |
             ${{ runner.os }}-node-
 
-      - name: "5. Install Dependencies (Natif / Tanpa VPN)"
+      # 4. Setup Cloudflare WARP VPN
+      - name: Setup Cloudflare WARP
         run: |
-          if (Test-Path "node_modules") {
-              Write-Host "Folder node_modules ditemukan dari Cache! Skip npm install."
-          } else {
-              Write-Host "Folder node_modules tidak ditemukan! Menjalankan npm install..."
-              npm install
-          }
-
-      - name: "6. Setup Cloudflare WARP VPN"
-        run: |
-          Write-Host "Mengunduh installer Cloudflare WARP..."
-          $warpUrl = "https://1111-releases.cloudflareclient.com/windows/Cloudflare_WARP_Release-x64.msi"
-          Invoke-WebRequest -Uri $warpUrl -OutFile "$env:TEMP\warp.msi"
+          echo "Menyiapkan Cloudflare WARP..."
+          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
+          sudo apt-get update
+          sudo apt-get install -y cloudflare-warp
           
-          Write-Host "Menginstal Cloudflare WARP secara senyap..."
-          Start-Process msiexec.exe -ArgumentList "/i `"$env:TEMP\warp.msi`" /quiet /norestart" -Wait
-          Start-Sleep -Seconds 15
+          warp-cli --accept-tos registration new
+          warp-cli --accept-tos mode warp
+          warp-cli --accept-tos connect
           
-          Write-Host "Meregistrasi dan Menghubungkan ke WARP..."
-          & "C:\Program Files\Cloudflare\Cloudflare WARP\warp-cli.exe" --accept-tos registration new
-          & "C:\Program Files\Cloudflare\Cloudflare WARP\warp-cli.exe" --accept-tos connect
-          Start-Sleep -Seconds 10
+          sleep 5
+          echo "IP VPN Aktif:"
+          curl -4 ifconfig.me
+          echo ""
+
+      # 5. Install & Run Bot (Dibatasi 5 Jam)
+      - name: Check Dependencies & Start Bot
+        run: |
+          if [ ! -d "node_modules" ]; then
+            echo "Install package..."
+            npm install
+          fi
           
-          $warpStatus = & "C:\Program Files\Cloudflare\Cloudflare WARP\warp-cli.exe" --accept-tos status
-          Write-Host "==============================="
-          Write-Host "Status WARP: $warpStatus"
-          Write-Host "==============================="
+          echo "Menjalankan bot selama 5 jam..."
+          # Perintah timeout akan menghentikan npm start secara otomatis setelah 5 jam
+          # "|| true" mencegah workflow dianggap gagal saat timeout mematikan bot
+          timeout 5h npm start || true 
 
-      - name: "7. Setup Tailscale"
+      # 6. Auto Backup (Commit & Push file yang berubah/session baru)
+      - name: Auto Backup Session to Repo
         run: |
-          $tsUrl = "https://dl.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          Invoke-WebRequest -Uri $tsUrl -OutFile "$env:TEMP\tailscale.msi"
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$env:TEMP\tailscale.msi`"", "/quiet", "/norestart" -Wait
-          Start-Sleep -Seconds 15
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=windows-rdp --accept-dns=false
-          $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-          Write-Host "==============================="
-          Write-Host "IP RDP (Tailscale): $tsIP"
-          Write-Host "==============================="
+          echo "Memulai backup data session..."
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git add .
+          
+          # Cek apakah ada file yang berubah (misal folder session)
+          if git diff-index --quiet HEAD --; then
+            echo "Tidak ada perubahan data untuk di-backup."
+          else
+            # Pakai [skip ci] biar pas nge-push ini nggak bikin trigger workflow tabrakan
+            git commit -m "Auto backup session & data (5 jam) [skip ci]"
+            git push https://${{ secrets.PAT_TOKEN }}@github.com/${{ github.repository }}.git HEAD:main
+            echo "Backup sukses di-push ke repository!"
+          fi
 
-      - name: "8. Run Bot with Auto-Restart"
+      # 7. Auto Trigger Workflow (Biar looping)
+      - name: Trigger Next Run
         run: |
-          # npm install sudah dilakukan di Step 5, di sini tinggal jalankan bot-nya saja
-          $script = @"
-          while(`$true) {
-              Write-Host "Menjalankan Bot..."
-              npm start
-              Write-Host "Bot crash, restart dalam 5 detik..."
-              Start-Sleep -Seconds 5
-          }
-          "@
-          $script | Out-File -FilePath "start_bot.ps1"
-          Start-Process powershell -ArgumentList "-ExecutionPolicy Bypass -File start_bot.ps1" -WindowStyle Normal
-
-      - name: "9. Keep Alive (Durasi 5 Jam)"
-        run: |
-          Write-Host "Server berjalan... Menunggu 5 jam sebelum auto-backup."
-          Start-Sleep -Seconds 18000
-
-      - name: "10. Auto-Backup Semua Perubahan File"
-        if: always()
-        run: |
-          git config --global user.name "GitHub Actions"
-          git config --global user.email "actions@github.com"
-          git add -A
-          $changes = git status --porcelain
-          if ($changes) {
-              Write-Host "Ditemukan perubahan file. Melakukan commit..."
-              git commit -m "Auto-backup data bot [skip ci]"
-              git push origin HEAD:main
-          } else {
-              Write-Host "Tidak ada perubahan file."
-          }
-
-      - name: "11. Auto-Up (Trigger Siklus Berikutnya)"
-        if: ${{ !cancelled() }}
-        env:
-          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-        run: |
-          gh workflow run "main.yml" --ref main
+          echo "Memicu ulang workflow untuk 5 jam berikutnya..."
+          curl -X POST \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Authorization: Bearer ${{ secrets.PAT_TOKEN }}" \
+            https://api.github.com/repos/${{ github.repository }}/actions/workflows/wabot.yml/dispatches \
+            -d '{"ref":"main"}'
+            
