@@ -26,7 +26,7 @@ jobs:
       - name: "2. Setup Node.js"
         uses: actions/setup-node@v4
         with:
-          node-version: '18' # Ganti ke 18 atau versi yang lu pake di RDP
+          node-version: '24' # Ganti ke 18 atau versi yang lu pake di RDP
 
 
       - name: "3. Cache Node Modules"
